@@ -1,0 +1,143 @@
+#Import requirements
+
+import torch
+import requests
+from PIL import Image
+from matplotlib import pyplot as plt
+import numpy as np
+
+# Import GradCAM function from LAVIS library
+from lavis.common.gradcam import getAttMap
+# Import model loading function from LAVIS library
+from lavis.models import load_model_and_preprocess
+
+# Define constants for image width and height
+IMG_WIDTH = 400
+IMG_HEIGHT = 300
+DST_WIDTH = 720
+
+def load_image(url: str) -> Image:
+    """
+    Load an image from a given URL.
+
+    Args:
+        url (str): URL of the image
+
+    Returns:
+        Image: Loaded image
+    """
+    response = requests.get(url, stream=True)
+    return Image.open(response.raw).convert('RGB')
+
+def setup_device() -> torch.device:
+    """
+    Set up the device to use for computation (GPU or CPU).
+
+    Returns:
+        torch.device: Device to use
+    """
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def load_model(device: torch.device) -> tuple:
+    """
+    Load the PNP VQA model and its preprocessors.
+
+    Args:
+        device (torch.device): Device to use
+
+    Returns:
+        tuple: Model, visual processors, and text processors
+    """
+    model, vis_processors, txt_processors = load_model_and_preprocess(
+        name="pnp_vqa", model_type="base", is_eval=True, device=device
+    )
+    return model, vis_processors, txt_processors
+
+def process_image(image: Image, vis_processors: dict) -> torch.Tensor:
+    """
+    Process an image using the visual processors.
+
+    Args:
+        image (Image): Input image
+        vis_processors (dict): Visual processors
+
+    Returns:
+        torch.Tensor: Processed image tensor
+    """
+    return vis_processors["eval"](image).unsqueeze(0).to(device)
+
+def process_question(question: str, txt_processors: dict) -> torch.Tensor:
+    """
+    Process a question using the text processors.
+
+    Args:
+        question (str): Input question
+        txt_processors (dict): Text processors
+
+    Returns:
+        torch.Tensor: Processed question tensor
+    """
+    return txt_processors["eval"](question)
+
+def visualize_gradcam(gradcam: torch.Tensor, image: Image) -> None:
+    """
+    Visualize the GradCAM attention map.
+
+    Args:
+        gradcam (torch.Tensor): GradCAM attention map
+        image (Image): Original image
+    """
+    w, h = image.size
+    scaling_factor = DST_WIDTH / w
+    resized_img = image.resize((int(w * scaling_factor), int(h * scaling_factor)))
+    norm_img = np.float32(resized_img) / 255
+    avg_gradcam = getAttMap(norm_img, gradcam, blur=True)
+    fig, ax = plt.subplots(1, 1, figsize=(5, 5))
+    ax.imshow(avg_gradcam, cmap='gray')
+    ax.set_yticks([])
+    ax.set_xticks([])
+    plt.show()
+
+def main() -> None:
+    """
+    Main execution function.
+    """
+    # Load image from URL
+    img_url = 'https://img.freepik.com/premium-photo/bowl-fruit-wooden-table_865967-21663.jpg'
+    raw_image = load_image(img_url)
+    display(raw_image.resize((IMG_WIDTH, IMG_HEIGHT)))
+    question = "What is the red object in the bowl called?"
+    print(question)
+
+    # Set up device
+    device = setup_device()
+    # Load model and preprocessors
+    model, vis_processors, txt_processors = load_model(device)
+
+    # Process image and question
+    image = process_image(raw_image, vis_processors)
+    question = process_question(question, txt_processors)
+
+    # Create sample input
+    samples = {"image": image, "text_input": [question]}
+    # Run ITM forward pass
+    samples = model.forward_itm(samples=samples)
+
+    # Visualize GradCAM attention map
+    visualize_gradcam(samples['gradcams'].reshape(24, 24), raw_image)
+
+    # Run captioning forward pass
+    samples = model.forward_cap(samples=samples, num_captions=50, num_patches=20)
+    print('Examples of question-guided captions: ')
+    print(samples['captions'][0][:5])
+
+    # Run QA forward pass
+    pred_answers = model.forward_qa(samples, num_captions=50)
+    print('Question: {} \nPredicted answer: {}'.format(question, pred_answers[0]))
+
+    # Run predict answers forward pass
+    pred_answers, caption, gradcam = model.predict_answers(samples, num_captions=50, num_patches=20)
+    print('Question: {} \nPredicted answer: {}'.format(question, pred_answers[0]))
+
+if __name__ == '__main__':
+    main()
